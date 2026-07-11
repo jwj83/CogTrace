@@ -56,6 +56,10 @@ def main() -> None:
         description="Run OpenHands SWE-bench with CogTrace online guard enabled."
     )
     parser.add_argument("llm_config", help="Path to OpenHands LLM config JSON.")
+    parser.add_argument(
+        "--agent-model",
+        help="Override the model ID for this run; bare IDs use the openai/ provider.",
+    )
     parser.add_argument("--instances", nargs="*", default=DEFAULT_INSTANCES)
     parser.add_argument("--workspace", choices=["docker", "remote", "apptainer"], default="docker")
     parser.add_argument(
@@ -69,11 +73,21 @@ def main() -> None:
     parser.add_argument("--condenser-keep-first", type=int)
     parser.add_argument(
         "--context-profile",
-        choices=["qwen-128k", "deepseek-512k"],
+        choices=["qwen-128k", "qwen-256k", "deepseek-512k"],
         default="qwen-128k",
     )
     parser.add_argument("--cogtrace-state-tokens", type=int)
     parser.add_argument("--cogtrace-recent-tokens", type=int)
+    parser.add_argument(
+        "--force-nonstream",
+        action="store_true",
+        help="Run the OpenAI-compatible agent endpoint without SSE streaming.",
+    )
+    parser.add_argument(
+        "--llm-timeout",
+        type=int,
+        help="Override the agent LLM HTTP timeout in seconds for this run only.",
+    )
     parser.add_argument(
         "--mode",
         choices=["shadow", "intervene"],
@@ -98,6 +112,24 @@ def main() -> None:
         sys.exit(2)
 
     output_dir = Path(args.output_dir).resolve()
+    runtime_llm_config = llm_config
+    if args.force_nonstream or args.llm_timeout is not None or args.agent_model:
+        config = json.loads(llm_config.read_text(encoding="utf-8"))
+        if args.agent_model:
+            config["model"] = (
+                args.agent_model
+                if "/" in args.agent_model
+                else f"openai/{args.agent_model}"
+            )
+        if args.force_nonstream:
+            config["stream"] = False
+        if args.llm_timeout is not None:
+            config["timeout"] = args.llm_timeout
+        runtime_llm_config = output_dir / ".runtime_llm_config.json"
+        runtime_llm_config.parent.mkdir(parents=True, exist_ok=True)
+        runtime_llm_config.write_text(
+            json.dumps(config, indent=2), encoding="utf-8"
+        )
     selection_path = output_dir / "selected_instances.txt"
     write_selection(selection_path, args.instances)
 
@@ -107,7 +139,7 @@ def main() -> None:
         "--with-editable",
         str(ROOT),
         "swebench-infer",
-        str(llm_config),
+        str(runtime_llm_config),
         "--dataset",
         args.dataset,
         "--split",
@@ -160,7 +192,11 @@ def main() -> None:
     )
     if args.dry_run:
         return
-    subprocess.run(cmd, cwd=BENCHMARKS, env=env, check=True)
+    try:
+        subprocess.run(cmd, cwd=BENCHMARKS, env=env, check=True)
+    finally:
+        if runtime_llm_config != llm_config:
+            runtime_llm_config.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

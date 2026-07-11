@@ -27,6 +27,11 @@ class ContextBudget:
         return cls(131_072, 8_192, 16_384)
 
     @classmethod
+    def qwen_256k(cls) -> "ContextBudget":
+        """Largest context size verified against the configured Qwen gateway."""
+        return cls(262_144, 16_384, 32_768)
+
+    @classmethod
     def deepseek_512k(cls) -> "ContextBudget":
         return cls(524_288, 16_384, 32_768)
 
@@ -47,9 +52,12 @@ class ContextBudget:
 
 def context_budget_from_env() -> ContextBudget:
     profile = os.getenv("COGTRACE_CONTEXT_PROFILE", "qwen-128k").lower()
-    base = (
-        ContextBudget.deepseek_512k() if profile == "deepseek-512k" else ContextBudget.qwen_128k()
-    )
+    if profile == "deepseek-512k":
+        base = ContextBudget.deepseek_512k()
+    elif profile == "qwen-256k":
+        base = ContextBudget.qwen_256k()
+    else:
+        base = ContextBudget.qwen_128k()
     return ContextBudget(
         total_input_tokens=int(
             os.getenv("COGTRACE_TOTAL_INPUT_TOKENS", str(base.total_input_tokens))

@@ -1,5 +1,5 @@
 diff --git a/benchmarks/swebench/run_infer.py b/benchmarks/swebench/run_infer.py
-index 8ccb3f33..f06b9665 100644
+index 8ccb3f33..21fe706e 100644
 --- a/benchmarks/swebench/run_infer.py
 +++ b/benchmarks/swebench/run_infer.py
 @@ -26,6 +26,8 @@ from benchmarks.utils.acp import (
@@ -147,33 +147,38 @@ index 8ccb3f33..f06b9665 100644
  
          logger.info("repo_path: %s", repo_path)
          source_repo_path = self.get_source_repo_path(instance)
-@@ -481,8 +551,23 @@ class SWEBenchEvaluation(Evaluation):
+@@ -479,10 +549,26 @@ class SWEBenchEvaluation(Evaluation):
+             metadata=self.metadata,
+             workspace_path=workspace.working_dir,
          )
-         with workspace_keepalive(self.metadata.agent_type, workspace):
-             conversation.send_message(instruction)
+-        with workspace_keepalive(self.metadata.agent_type, workspace):
+-            conversation.send_message(instruction)
 -            # Run conversation with fake user responses to handle agent messages
 -            run_conversation_with_fake_user_response(conversation)
-+            if cogtrace_intervene:
-+                from benchmarks.utils.cogtrace_guard import (
-+                    run_conversation_with_cogtrace_guard,
-+                )
++        try:
++            with workspace_keepalive(self.metadata.agent_type, workspace):
++                conversation.send_message(instruction)
++                if cogtrace_intervene:
++                    from benchmarks.utils.cogtrace_guard import (
++                        run_conversation_with_cogtrace_guard,
++                    )
 +
-+                run_conversation_with_cogtrace_guard(
-+                    conversation,
-+                    controller=cogtrace_controller,
-+                    output_dir=self.metadata.eval_output_dir,
-+                    instance_id=instance.id,
-+                )
-+            else:
-+                # Run conversation with fake user responses to handle agent messages
-+                run_conversation_with_fake_user_response(conversation)
-+
-+        if cogtrace_controller is not None:
-+            cogtrace_controller.save(self.metadata.eval_output_dir)
++                    run_conversation_with_cogtrace_guard(
++                        conversation,
++                        controller=cogtrace_controller,
++                        output_dir=self.metadata.eval_output_dir,
++                        instance_id=instance.id,
++                    )
++                else:
++                    # Run conversation with fake user responses to handle agent messages
++                    run_conversation_with_fake_user_response(conversation)
++        finally:
++            if cogtrace_controller is not None:
++                cogtrace_controller.save(self.metadata.eval_output_dir)
  
          # git add
          workspace.execute_command(f"cd {repo_path} ; git add -A")
-@@ -511,6 +596,9 @@ class SWEBenchEvaluation(Evaluation):
+@@ -511,6 +597,9 @@ class SWEBenchEvaluation(Evaluation):
          test_result: dict[str, Any] = {
              "git_patch": git_patch,
          }

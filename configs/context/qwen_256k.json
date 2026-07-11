@@ -1,0 +1,6 @@
+{
+  "total_input_tokens": 262144,
+  "recent_event_tokens": 16384,
+  "state_tokens": 32768,
+  "verification": "A 250016-token OpenAI-compatible qwen3.5 request succeeded; 510000 tokens returned HTTP 422."
+}
