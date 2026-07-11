@@ -74,6 +74,12 @@ def main() -> None:
     )
     parser.add_argument("--cogtrace-state-tokens", type=int)
     parser.add_argument("--cogtrace-recent-tokens", type=int)
+    parser.add_argument(
+        "--mode",
+        choices=["shadow", "intervene"],
+        default="intervene",
+        help="Shadow records state only; intervene enables CogTrace context and guards.",
+    )
     parser.add_argument("--no-cogtrace", action="store_true")
     parser.add_argument("--dataset", default="princeton-nlp/SWE-bench_Verified")
     parser.add_argument("--split", default="test")
@@ -133,6 +139,7 @@ def main() -> None:
         env.pop("COGTRACE_ONLINE", None)
     else:
         env["COGTRACE_ONLINE"] = "1"
+        env["COGTRACE_MODE"] = args.mode
         env["COGTRACE_CONTEXT_PROFILE"] = args.context_profile
         if args.cogtrace_state_tokens is not None:
             env["COGTRACE_STATE_TOKENS"] = str(args.cogtrace_state_tokens)
@@ -146,7 +153,7 @@ def main() -> None:
     print("Running:")
     print(" ".join(cmd))
     cogtrace_status = "0" if args.no_cogtrace else "1"
-    print(f"COGTRACE_ONLINE={cogtrace_status}")
+    print(f"COGTRACE_ONLINE={cogtrace_status} COGTRACE_MODE={args.mode}")
     print(
         "BENCHMARKS_DISABLE_PUBLIC_SKILLS=1 BENCHMARKS_LIGHT_SYSTEM_PROMPT=1 "
         "BENCHMARKS_SHORT_TASK_PROMPT=1"
