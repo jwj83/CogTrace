@@ -1,0 +1,12 @@
+{
+  "conditions": ["raw", "summary", "cogtrace_context", "cogtrace_context_guard"],
+  "benchmarks": {
+    "swebench_verified": 80,
+    "swebench_pro": 80
+  },
+  "rollouts_per_condition": 2,
+  "agent_model": "Qwen/Qwen2.5-Coder-14B-Instruct",
+  "state_model": "Qwen/Qwen2.5-Coder-32B-Instruct",
+  "split_unit": "repository",
+  "primary_metric": "resolved_rate"
+}

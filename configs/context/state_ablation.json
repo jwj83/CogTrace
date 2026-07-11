@@ -1,0 +1,5 @@
+{
+  "total_input_tokens": [131072, 524288],
+  "state_tokens": [4096, 16384, 32768],
+  "comparison_rule": "Use the same total input-token cap for raw, summary, and CogTrace. Fill unused CogTrace state capacity with provenance-linked raw evidence."
+}

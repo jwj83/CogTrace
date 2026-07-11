@@ -1,0 +1,12 @@
+{
+  "gpu_host": "8x RTX PRO 6000 Blackwell 96GB",
+  "student_model": "Qwen/Qwen2.5-Coder-14B-Instruct",
+  "teacher_model": "Qwen/Qwen2.5-Coder-32B-Instruct",
+  "iterations": 2,
+  "rollouts_per_iteration": 2500,
+  "max_failure_states_per_trajectory": 3,
+  "target_failure_states": 10000,
+  "teacher_top_k_logprobs": 64,
+  "objectives": ["sft", "dpo", "reverse_kl"],
+  "forbidden_training_sources": ["SWE-bench_Verified", "SWE-bench_Pro"]
+}

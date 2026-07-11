@@ -1,0 +1,571 @@
+diff --git a/benchmarks/swebench/run_infer.py b/benchmarks/swebench/run_infer.py
+index 8ccb3f33..85277f99 100644
+--- a/benchmarks/swebench/run_infer.py
++++ b/benchmarks/swebench/run_infer.py
+@@ -26,6 +26,8 @@ from benchmarks.utils.acp import (
+ from benchmarks.utils.agent_context import create_agent_context
+ from benchmarks.utils.args_parser import add_prompt_path_argument, get_parser
+ from benchmarks.utils.build_utils import ensure_local_image
++from benchmarks.utils.cogtrace_condenser import CogTraceCondenser
++from benchmarks.utils.cogtrace_guard import CogTraceOnlineController
+ from benchmarks.utils.console_logging import summarize_instance
+ from benchmarks.utils.constants import EVAL_AGENT_SERVER_IMAGE
+ from benchmarks.utils.conversation import build_event_persistence_callback
+@@ -57,6 +59,13 @@ from openhands.workspace import APIRemoteWorkspace, ApptainerWorkspace, DockerWo
+ 
+ logger = get_logger(__name__)
+ 
++LIGHT_SYSTEM_PROMPT = """You are an autonomous coding agent running inside a Linux workspace.
++
++Solve the user's issue by inspecting the repository, editing files, and running focused tests.
++Prefer small, correct patches. Use the available tools exactly as specified by the tool format.
++When you believe the fix is complete, call the finish tool with a concise summary.
++"""
++
+ 
+ def get_instruction(
+     instance: dict,
+@@ -67,6 +76,26 @@ def get_instruction(
+     workspace_dir_name = instance["repo"].split("/")[-1]
+     assert metadata.details is not None
+ 
++    if os.getenv("BENCHMARKS_SHORT_TASK_PROMPT", "").lower() in {
++        "1",
++        "true",
++        "yes",
++        "on",
++    }:
++        repo_path = (
++            instance.get("repo_path") or f"{workspace_path}/{workspace_dir_name}"
++        )
++        return (
++            f"You are working in the repository at {repo_path}.\n\n"
++            "Issue description:\n"
++            "<issue_description>\n"
++            f"{instance['problem_statement']}\n"
++            "</issue_description>\n\n"
++            "Make the minimal source-code change needed to satisfy the issue. "
++            "Do not edit tests unless the issue explicitly requires it. "
++            "Run focused checks when useful, then finish with a concise summary."
++        )
++
+     # Set up Jinja2 environment
+     assert metadata.prompt_path is not None
+     prompts_dir = os.path.dirname(metadata.prompt_path)
+@@ -395,6 +424,18 @@ class SWEBenchEvaluation(Evaluation):
+         Create conversation, run agent, collect history and git patch.
+         Do not write files here; just return EvalOutput.
+         """
++        cogtrace_online = os.getenv("COGTRACE_ONLINE", "").lower() in {
++            "1",
++            "true",
++            "yes",
++            "on",
++        }
++        cogtrace_controller = (
++            CogTraceOnlineController(instance_id=instance.id)
++            if cogtrace_online
++            else None
++        )
++
+         if is_acp_agent(self.metadata.agent_type):
+             agent = build_acp_agent(self.metadata.agent_type, self.metadata.llm.model)
+         else:
+@@ -421,21 +462,40 @@ class SWEBenchEvaluation(Evaluation):
+                             ),
+                         },
+                     )
+-                condenser = LLMSummarizingCondenser(
+-                    llm=condenser_llm,
+-                    max_size=self.metadata.condenser_max_size,
+-                    max_tokens=self.metadata.condenser_max_tokens,
+-                    keep_first=self.metadata.condenser_keep_first,
++                condenser_kwargs = {
++                    "llm": condenser_llm,
++                    "max_size": self.metadata.condenser_max_size,
++                    "max_tokens": self.metadata.condenser_max_tokens,
++                    "keep_first": self.metadata.condenser_keep_first,
++                }
++                condenser = (
++                    CogTraceCondenser(
++                        controller=cogtrace_controller,
++                        **condenser_kwargs,
++                    )
++                    if cogtrace_controller is not None
++                    else LLMSummarizingCondenser(**condenser_kwargs)
+                 )
+             # Load public skills (respects EXTENSIONS_REF env var)
+             agent_context = create_agent_context()
+ 
++            agent_kwargs = {
++                "llm": agent_llm,
++                "tools": tools,
++                "condenser": condenser,
++                "agent_context": agent_context,
++            }
++            if os.getenv("BENCHMARKS_LIGHT_SYSTEM_PROMPT", "").lower() in {
++                "1",
++                "true",
++                "yes",
++                "on",
++            }:
++                agent_kwargs["system_prompt"] = LIGHT_SYSTEM_PROMPT
++            else:
++                agent_kwargs["system_prompt_kwargs"] = {"cli_mode": True}
+             agent = Agent(
+-                llm=agent_llm,
+-                tools=tools,
+-                system_prompt_kwargs={"cli_mode": True},
+-                condenser=condenser,
+-                agent_context=agent_context,
++                **agent_kwargs,
+                 # TODO: we can enable security analyzer later
+                 # security_analyzer=LLMSecurityAnalyzer(),
+             )
+@@ -453,13 +513,19 @@ class SWEBenchEvaluation(Evaluation):
+             attempt=self.current_attempt,
+         )
+ 
++        callbacks = [persist_callback]
++        if cogtrace_controller is not None:
++            callbacks.append(cogtrace_controller.callback)
++
+         conversation = Conversation(
+             agent=agent,
+             workspace=workspace,
+-            callbacks=[persist_callback],
++            callbacks=callbacks,
+             max_iteration_per_run=self.metadata.max_iterations,
+             delete_on_close=True,
+         )
++        if cogtrace_controller is not None:
++            cogtrace_controller.attach(conversation)
+ 
+         logger.info("repo_path: %s", repo_path)
+         source_repo_path = self.get_source_repo_path(instance)
+@@ -481,8 +547,20 @@ class SWEBenchEvaluation(Evaluation):
+         )
+         with workspace_keepalive(self.metadata.agent_type, workspace):
+             conversation.send_message(instruction)
+-            # Run conversation with fake user responses to handle agent messages
+-            run_conversation_with_fake_user_response(conversation)
++            if cogtrace_online:
++                from benchmarks.utils.cogtrace_guard import (
++                    run_conversation_with_cogtrace_guard,
++                )
++
++                run_conversation_with_cogtrace_guard(
++                    conversation,
++                    controller=cogtrace_controller,
++                    output_dir=self.metadata.eval_output_dir,
++                    instance_id=instance.id,
++                )
++            else:
++                # Run conversation with fake user responses to handle agent messages
++                run_conversation_with_fake_user_response(conversation)
+ 
+         # git add
+         workspace.execute_command(f"cd {repo_path} ; git add -A")
+@@ -511,6 +589,8 @@ class SWEBenchEvaluation(Evaluation):
+         test_result: dict[str, Any] = {
+             "git_patch": git_patch,
+         }
++        if cogtrace_online:
++            test_result["cogtrace_online"] = True
+         if isinstance(agent, ACPAgent):
+             add_acp_agent_metadata(test_result, conversation)
+ 
+diff --git a/benchmarks/utils/cogtrace_condenser.py b/benchmarks/utils/cogtrace_condenser.py
+new file mode 100644
+index 00000000..1b919c34
+--- /dev/null
++++ b/benchmarks/utils/cogtrace_condenser.py
+@@ -0,0 +1,40 @@
++from __future__ import annotations
++
++from collections.abc import Sequence
++from typing import TYPE_CHECKING
++
++from pydantic import PrivateAttr
++
++from openhands.sdk.context.condenser import LLMSummarizingCondenser
++from openhands.sdk.event.base import LLMConvertibleEvent
++from openhands.sdk.event.condenser import Condensation
++
++
++if TYPE_CHECKING:
++    from benchmarks.utils.cogtrace_guard import CogTraceOnlineController
++
++
++class CogTraceCondenser(LLMSummarizingCondenser):
++    """Use OpenHands' safe rolling-window selection with a grounded state summary."""
++
++    _controller: "CogTraceOnlineController" = PrivateAttr()
++
++    def __init__(self, *, controller: "CogTraceOnlineController", **data) -> None:
++        super().__init__(**data)
++        self._controller = controller
++
++    def _generate_condensation(
++        self,
++        forgotten_events: Sequence[LLMConvertibleEvent],
++        summary_offset: int,
++        max_event_str_length: int | None = None,
++    ) -> Condensation:
++        del max_event_str_length
++        if not forgotten_events:
++            raise ValueError("No events available for CogTrace condensation")
++        return Condensation(
++            forgotten_event_ids={event.id for event in forgotten_events},
++            summary=self._controller.manager.render(),
++            summary_offset=summary_offset,
++            llm_response_id=f"cogtrace-{forgotten_events[-1].id}",
++        )
+diff --git a/benchmarks/utils/cogtrace_guard.py b/benchmarks/utils/cogtrace_guard.py
+new file mode 100644
+index 00000000..109448c0
+--- /dev/null
++++ b/benchmarks/utils/cogtrace_guard.py
+@@ -0,0 +1,342 @@
++from __future__ import annotations
++
++import json
++import os
++from pathlib import Path
++from threading import RLock
++from typing import Any
++
++from benchmarks.utils.fake_user_response import (
++    _agent_finished_with_finish_action,
++    _agent_sent_message,
++    fake_user_response,
++)
++from cog_trace.context import context_budget_from_env
++from cog_trace.core.schema import NormalizedEvent, TraceStep
++from cog_trace.extraction import extractor_from_env
++from cog_trace.runtime.manager import CogTraceManager
++from openhands.sdk import get_logger
++from openhands.sdk.conversation.state import ConversationExecutionStatus
++from openhands.sdk.event import ActionEvent, MessageEvent, ObservationEvent
++from openhands.sdk.llm import content_to_str
++
++
++logger = get_logger(__name__)
++
++
++def _content_to_text(content: Any) -> str:
++    if content is None:
++        return ""
++    if isinstance(content, str):
++        return content
++    try:
++        parts = content_to_str(content)
++        return "".join(parts)
++    except Exception:
++        return str(content)
++
++
++def _model_to_dict(obj: Any) -> dict[str, Any]:
++    if obj is None:
++        return {}
++    if hasattr(obj, "model_dump"):
++        return obj.model_dump(mode="json")
++    if isinstance(obj, dict):
++        return obj
++    return {"value": str(obj)}
++
++
++def _action_field(action: Any, *names: str) -> str:
++    for name in names:
++        value = getattr(action, name, None)
++        if value not in (None, ""):
++            return str(value)
++    return ""
++
++
++def event_to_trace_step(event: Any, event_index: int) -> TraceStep | None:
++    if isinstance(event, MessageEvent):
++        message = _content_to_text(event.to_llm_message().content)
++        return TraceStep(
++            event_index=event_index,
++            kind="MessageEvent",
++            source=event.source,
++            message=message,
++            raw=event.model_dump(mode="json"),
++        )
++
++    if isinstance(event, ActionEvent):
++        action = event.action
++        thought = " ".join(piece.text for piece in event.thought)
++        raw_action = _model_to_dict(action)
++        raw = event.model_dump(mode="json")
++        raw["action"] = raw_action
++        return TraceStep(
++            event_index=event_index,
++            kind="ActionEvent",
++            source=event.source,
++            tool_name=event.tool_name,
++            thought=thought,
++            action_command=_action_field(action, "command", "cmd", "pattern"),
++            action_path=_action_field(action, "path", "file_path", "dir_path"),
++            raw=raw,
++        )
++
++    if isinstance(event, ObservationEvent):
++        observation = event.observation
++        obs_text = _content_to_text(observation.to_llm_content)
++        raw = event.model_dump(mode="json")
++        return TraceStep(
++            event_index=event_index,
++            kind="ObservationEvent",
++            source=event.source,
++            tool_name=event.tool_name,
++            observation=obs_text,
++            raw=raw,
++        )
++
++    return None
++
++
++def _guard_text(kind: str, message: str) -> str:
++    chunks = [
++        "CogTrace cognitive-state checkpoint:",
++        "",
++        f"Signal: {kind}",
++        "Before continuing, reconcile the following grounded cognitive-state signal.",
++        "If the signal is correct, revise your next action or patch. If it is wrong, explicitly refute it with evidence from the repository or tests.",
++        "",
++        message,
++    ]
++    return "\n".join(chunks).strip()
++
++
++class CogTraceOnlineController:
++    """Online CogTrace observer that can pause a running conversation.
++
++    The controller is installed as a normal Conversation callback. It updates the
++    cognitive graph from streamed events and asks the remote conversation to pause
++    when a fresh guard signal appears. The outer loop then sends the guard message
++    and resumes the agent.
++    """
++
++    def __init__(
++        self,
++        *,
++        instance_id: str = "unknown",
++        max_guard_messages: int = 8,
++    ) -> None:
++        self.instance_id = instance_id
++        self.max_guard_messages = max_guard_messages
++        extractor = extractor_from_env()
++        self.manager = CogTraceManager(
++            extractor=extractor,
++            semantic_guards_enabled=extractor is not None,
++            context_budget=context_budget_from_env(),
++        )
++        self.guard_log: list[dict[str, Any]] = []
++        self._conversation = None
++        self._lock = RLock()
++        self._event_ids: set[str] = set()
++        self._next_event_index = 0
++        self._pending_guard: str | None = None
++        self._guard_message_count = 0
++
++    def attach(self, conversation) -> None:
++        self._conversation = conversation
++
++    def callback(self, event: Any) -> None:
++        with self._lock:
++            event_id = str(getattr(event, "id", "") or id(event))
++            if event_id in self._event_ids:
++                return
++            self._event_ids.add(event_id)
++
++            step = event_to_trace_step(event, self._next_event_index)
++            if step is None:
++                return
++            self._next_event_index += 1
++
++            result = self.manager.process_event(step)
++            decision = result.guard_decision
++            if decision is None:
++                return
++            guard_text = _guard_text(decision.kind, decision.message)
++
++            if self._guard_message_count >= self.max_guard_messages:
++                logger.info(
++                    "CogTrace guard signal suppressed for %s: max guard messages reached",
++                    self.instance_id,
++                )
++                return
++
++            self._pending_guard = guard_text
++            self._guard_message_count += 1
++            self.guard_log.append(
++                {
++                    "event_index": step.event_index,
++                    "event_count": self._next_event_index,
++                    "message": guard_text,
++                    "kind": decision.kind,
++                    "should_block": decision.should_block,
++                    "related_node_ids": decision.related_node_ids,
++                }
++            )
++            if decision.should_block:
++                self._block_action(event, guard_text)
++                self._pause_conversation()
++
++    def _block_action(self, event: Any, reason: str) -> None:
++        if self._conversation is None or not isinstance(event, ActionEvent):
++            return
++        try:
++            self._conversation.state.block_action(event.id, reason)
++        except Exception as exc:
++            logger.warning("CogTrace failed to mark action as blocked: %s", exc)
++
++    def _pause_conversation(self) -> None:
++        if self._conversation is None:
++            return
++        try:
++            self._conversation.pause()
++        except Exception as exc:
++            logger.warning("CogTrace failed to pause conversation: %s", exc)
++            try:
++                self._conversation.interrupt()
++            except Exception as interrupt_exc:
++                logger.warning(
++                    "CogTrace failed to interrupt conversation after pause failure: %s",
++                    interrupt_exc,
++                )
++
++    def consume_pending_guard(self) -> str | None:
++        with self._lock:
++            guard = self._pending_guard
++            self._pending_guard = None
++            return guard
++
++    def maybe_finish_guard(self) -> str | None:
++        with self._lock:
++            event = NormalizedEvent(
++                event_id=f"cogtrace-finish-check-{self._next_event_index}",
++                step_id=self._next_event_index,
++                type="finish",
++                raw_text="CogTrace synthetic finish verification",
++                tool_name="finish",
++            )
++            decision = self.manager.process_event(event).guard_decision
++            if decision is None or self._guard_message_count >= self.max_guard_messages:
++                return None
++            guard_text = _guard_text(decision.kind, decision.message)
++            self._guard_message_count += 1
++            self.guard_log.append(
++                {
++                    "event_index": self._next_event_index,
++                    "event_count": self._next_event_index,
++                    "message": guard_text,
++                    "kind": decision.kind,
++                    "should_block": decision.should_block,
++                    "finish_guard": True,
++                }
++            )
++            return guard_text if decision.should_block else None
++
++    def save(self, output_dir: str | Path | None) -> None:
++        if output_dir is None:
++            return
++        path = Path(output_dir) / "cogtrace_online" / self.instance_id
++        path.mkdir(parents=True, exist_ok=True)
++        (path / "graph.json").write_text(
++            json.dumps(self.manager.graph.to_dict(), indent=2, ensure_ascii=False),
++            encoding="utf-8",
++        )
++        (path / "credit_events.json").write_text(
++            json.dumps(
++                [item.to_dict() for item in self.manager.credit_events],
++                indent=2,
++                ensure_ascii=False,
++            ),
++            encoding="utf-8",
++        )
++        (path / "guard_injections.json").write_text(
++            json.dumps(self.guard_log, indent=2, ensure_ascii=False),
++            encoding="utf-8",
++        )
++        (path / "guard_messages.md").write_text(
++            self.manager.render_guard_messages(),
++            encoding="utf-8",
++        )
++        (path / "summary.json").write_text(
++            json.dumps(self.manager.summary(), indent=2, ensure_ascii=False),
++            encoding="utf-8",
++        )
++
++
++def run_conversation_with_cogtrace_guard(
++    conversation,
++    *,
++    controller: CogTraceOnlineController,
++    output_dir: str | Path | None = None,
++    instance_id: str = "unknown",
++    max_fake_responses: int = 10,
++) -> CogTraceManager:
++    """Run an OpenHands conversation with online CogTrace intervention.
++
++    This is a drop-in replacement for run_conversation_with_fake_user_response.
++    It lets the SDK run normally; CogTrace pauses the conversation from a
++    callback only when it has a fresh guard signal to inject.
++    """
++
++    run_timeout = int(os.getenv("CONVERSATION_TIMEOUT", "3600"))
++    fake_response_count = 0
++    controller.attach(conversation)
++
++    while True:
++        conversation.run(timeout=run_timeout)
++        events = list(conversation.state.events)
++        status = conversation.state.execution_status
++
++        guard_text = controller.consume_pending_guard()
++        if guard_text:
++            logger.info(
++                "CogTrace injecting guard #%d for %s",
++                len(controller.guard_log),
++                instance_id,
++            )
++            conversation.send_message(guard_text, sender="cogtrace")
++            continue
++
++        if status != ConversationExecutionStatus.FINISHED:
++            logger.info("Conversation ended with status: %s", status.value)
++            break
++
++        events = list(conversation.state.events)
++        if _agent_finished_with_finish_action(events):
++            finish_guard = controller.maybe_finish_guard()
++            if finish_guard:
++                logger.info("CogTrace injecting finish guard for %s", instance_id)
++                conversation.send_message(finish_guard, sender="cogtrace")
++                continue
++            logger.info("Agent finished with FinishAction under CogTrace")
++            break
++
++        if not _agent_sent_message(events):
++            logger.warning(
++                "Conversation finished without FinishAction or agent message"
++            )
++            break
++
++        if fake_response_count >= max_fake_responses:
++            logger.warning("Reached maximum fake responses; stopping conversation")
++            break
++
++        fake_response = fake_user_response(conversation)
++        if fake_response == "/exit":
++            logger.info("Fake user response returned /exit; stopping")
++            break
++
++        conversation.send_message(fake_response)
++        fake_response_count += 1
++
++    controller.save(output_dir)
++    return controller.manager
