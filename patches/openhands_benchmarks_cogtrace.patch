@@ -1,5 +1,5 @@
 diff --git a/benchmarks/swebench/run_infer.py b/benchmarks/swebench/run_infer.py
-index 8ccb3f33..21fe706e 100644
+index 8ccb3f33..4d16ef0e 100644
 --- a/benchmarks/swebench/run_infer.py
 +++ b/benchmarks/swebench/run_infer.py
 @@ -26,6 +26,8 @@ from benchmarks.utils.acp import (
@@ -147,7 +147,7 @@ index 8ccb3f33..21fe706e 100644
  
          logger.info("repo_path: %s", repo_path)
          source_repo_path = self.get_source_repo_path(instance)
-@@ -479,10 +549,26 @@ class SWEBenchEvaluation(Evaluation):
+@@ -479,10 +549,27 @@ class SWEBenchEvaluation(Evaluation):
              metadata=self.metadata,
              workspace_path=workspace.working_dir,
          )
@@ -174,11 +174,12 @@ index 8ccb3f33..21fe706e 100644
 +                    run_conversation_with_fake_user_response(conversation)
 +        finally:
 +            if cogtrace_controller is not None:
++                cogtrace_controller.reconcile(list(conversation.state.events))
 +                cogtrace_controller.save(self.metadata.eval_output_dir)
  
          # git add
          workspace.execute_command(f"cd {repo_path} ; git add -A")
-@@ -511,6 +597,9 @@ class SWEBenchEvaluation(Evaluation):
+@@ -511,6 +598,9 @@ class SWEBenchEvaluation(Evaluation):
          test_result: dict[str, Any] = {
              "git_patch": git_patch,
          }
@@ -236,10 +237,10 @@ index 00000000..1b919c34
 +        )
 diff --git a/benchmarks/utils/cogtrace_guard.py b/benchmarks/utils/cogtrace_guard.py
 new file mode 100644
-index 00000000..b91f5b60
+index 00000000..c9d9810b
 --- /dev/null
 +++ b/benchmarks/utils/cogtrace_guard.py
-@@ -0,0 +1,350 @@
+@@ -0,0 +1,359 @@
 +from __future__ import annotations
 +
 +import json
@@ -390,6 +391,15 @@ index 00000000..b91f5b60
 +
 +    def attach(self, conversation) -> None:
 +        self._conversation = conversation
++
++    def reconcile(self, events: list[Any]) -> None:
++        """Replay the authoritative event list to fill WebSocket delivery gaps.
++
++        ``callback`` is idempotent by event id, so events already observed online
++        are skipped while missing remote events are processed in final order.
++        """
++        for event in events:
++            self.callback(event)
 +
 +    def callback(self, event: Any) -> None:
 +        with self._lock:
