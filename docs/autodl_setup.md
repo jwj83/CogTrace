@@ -15,11 +15,13 @@ editing files or downloading results, not running Docker task environments.
 
 ## One-time setup
 
-Clone this private repository and run:
+Use the expanded data disk, then clone this private repository and run:
 
 ```bash
-git clone https://github.com/jwj83/CogTrace.git
-cd CogTrace
+source /etc/network_turbo
+cd /root/autodl-tmp
+git clone https://github.com/jwj83/CogTrace.git CogTrace
+cd /root/autodl-tmp/CogTrace
 bash scripts/autodl_bootstrap.sh
 cp .env.example .env
 chmod 600 .env
@@ -29,8 +31,9 @@ Put the API key only in `.env`; do not paste it into a shell history, commit it,
 or place it in an experiment configuration.
 
 The bootstrap script clones the pinned OpenHands benchmark source into
-`benchmarks/` and applies the versioned CogTrace integration patch. It stops if
-Docker is unavailable.
+`benchmarks/`, applies the versioned CogTrace integration patch, and places
+Python/Hugging Face caches below `/root/autodl-tmp/cogtrace/`. It stops if Docker
+is unavailable and reports Docker's own image-storage directory separately.
 
 ## First smoke run
 
@@ -38,6 +41,7 @@ Use `tmux` so an SSH disconnect does not terminate the job:
 
 ```bash
 tmux new -s cogtrace
+source /etc/network_turbo
 set -a; source .env; set +a
 python -m scripts.run_online_openhands /secure/path/agent.json \
   --mode shadow \

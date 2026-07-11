@@ -1,5 +1,5 @@
 diff --git a/benchmarks/swebench/run_infer.py b/benchmarks/swebench/run_infer.py
-index 8ccb3f33..85277f99 100644
+index 8ccb3f33..f06b9665 100644
 --- a/benchmarks/swebench/run_infer.py
 +++ b/benchmarks/swebench/run_infer.py
 @@ -26,6 +26,8 @@ from benchmarks.utils.acp import (
@@ -52,7 +52,7 @@ index 8ccb3f33..85277f99 100644
      # Set up Jinja2 environment
      assert metadata.prompt_path is not None
      prompts_dir = os.path.dirname(metadata.prompt_path)
-@@ -395,6 +424,18 @@ class SWEBenchEvaluation(Evaluation):
+@@ -395,6 +424,22 @@ class SWEBenchEvaluation(Evaluation):
          Create conversation, run agent, collect history and git patch.
          Do not write files here; just return EvalOutput.
          """
@@ -62,8 +62,12 @@ index 8ccb3f33..85277f99 100644
 +            "yes",
 +            "on",
 +        }
++        cogtrace_mode = os.getenv("COGTRACE_MODE", "intervene").lower()
++        if cogtrace_mode not in {"shadow", "intervene"}:
++            raise ValueError("COGTRACE_MODE must be 'shadow' or 'intervene'")
++        cogtrace_intervene = cogtrace_online and cogtrace_mode == "intervene"
 +        cogtrace_controller = (
-+            CogTraceOnlineController(instance_id=instance.id)
++            CogTraceOnlineController(instance_id=instance.id, mode=cogtrace_mode)
 +            if cogtrace_online
 +            else None
 +        )
@@ -71,7 +75,7 @@ index 8ccb3f33..85277f99 100644
          if is_acp_agent(self.metadata.agent_type):
              agent = build_acp_agent(self.metadata.agent_type, self.metadata.llm.model)
          else:
-@@ -421,21 +462,40 @@ class SWEBenchEvaluation(Evaluation):
+@@ -421,21 +466,40 @@ class SWEBenchEvaluation(Evaluation):
                              ),
                          },
                      )
@@ -91,7 +95,7 @@ index 8ccb3f33..85277f99 100644
 +                        controller=cogtrace_controller,
 +                        **condenser_kwargs,
 +                    )
-+                    if cogtrace_controller is not None
++                    if cogtrace_intervene
 +                    else LLMSummarizingCondenser(**condenser_kwargs)
                  )
              # Load public skills (respects EXTENSIONS_REF env var)
@@ -122,7 +126,7 @@ index 8ccb3f33..85277f99 100644
                  # TODO: we can enable security analyzer later
                  # security_analyzer=LLMSecurityAnalyzer(),
              )
-@@ -453,13 +513,19 @@ class SWEBenchEvaluation(Evaluation):
+@@ -453,13 +517,19 @@ class SWEBenchEvaluation(Evaluation):
              attempt=self.current_attempt,
          )
  
@@ -143,13 +147,13 @@ index 8ccb3f33..85277f99 100644
  
          logger.info("repo_path: %s", repo_path)
          source_repo_path = self.get_source_repo_path(instance)
-@@ -481,8 +547,20 @@ class SWEBenchEvaluation(Evaluation):
+@@ -481,8 +551,23 @@ class SWEBenchEvaluation(Evaluation):
          )
          with workspace_keepalive(self.metadata.agent_type, workspace):
              conversation.send_message(instruction)
 -            # Run conversation with fake user responses to handle agent messages
 -            run_conversation_with_fake_user_response(conversation)
-+            if cogtrace_online:
++            if cogtrace_intervene:
 +                from benchmarks.utils.cogtrace_guard import (
 +                    run_conversation_with_cogtrace_guard,
 +                )
@@ -163,15 +167,19 @@ index 8ccb3f33..85277f99 100644
 +            else:
 +                # Run conversation with fake user responses to handle agent messages
 +                run_conversation_with_fake_user_response(conversation)
++
++        if cogtrace_controller is not None:
++            cogtrace_controller.save(self.metadata.eval_output_dir)
  
          # git add
          workspace.execute_command(f"cd {repo_path} ; git add -A")
-@@ -511,6 +589,8 @@ class SWEBenchEvaluation(Evaluation):
+@@ -511,6 +596,9 @@ class SWEBenchEvaluation(Evaluation):
          test_result: dict[str, Any] = {
              "git_patch": git_patch,
          }
 +        if cogtrace_online:
 +            test_result["cogtrace_online"] = True
++            test_result["cogtrace_mode"] = cogtrace_mode
          if isinstance(agent, ACPAgent):
              add_acp_agent_metadata(test_result, conversation)
  
@@ -223,10 +231,10 @@ index 00000000..1b919c34
 +        )
 diff --git a/benchmarks/utils/cogtrace_guard.py b/benchmarks/utils/cogtrace_guard.py
 new file mode 100644
-index 00000000..109448c0
+index 00000000..b91f5b60
 --- /dev/null
 +++ b/benchmarks/utils/cogtrace_guard.py
-@@ -0,0 +1,342 @@
+@@ -0,0 +1,350 @@
 +from __future__ import annotations
 +
 +import json
@@ -354,13 +362,17 @@ index 00000000..109448c0
 +        *,
 +        instance_id: str = "unknown",
 +        max_guard_messages: int = 8,
++        mode: str = "intervene",
 +    ) -> None:
++        if mode not in {"shadow", "intervene"}:
++            raise ValueError("CogTrace mode must be 'shadow' or 'intervene'")
 +        self.instance_id = instance_id
 +        self.max_guard_messages = max_guard_messages
++        self.mode = mode
 +        extractor = extractor_from_env()
 +        self.manager = CogTraceManager(
 +            extractor=extractor,
-+            semantic_guards_enabled=extractor is not None,
++            semantic_guards_enabled=extractor is not None and mode == "intervene",
 +            context_budget=context_budget_from_env(),
 +        )
 +        self.guard_log: list[dict[str, Any]] = []
@@ -387,6 +399,8 @@ index 00000000..109448c0
 +            self._next_event_index += 1
 +
 +            result = self.manager.process_event(step)
++            if self.mode == "shadow":
++                return
 +            decision = result.guard_decision
 +            if decision is None:
 +                return
@@ -446,6 +460,8 @@ index 00000000..109448c0
 +
 +    def maybe_finish_guard(self) -> str | None:
 +        with self._lock:
++            if self.mode == "shadow":
++                return None
 +            event = NormalizedEvent(
 +                event_id=f"cogtrace-finish-check-{self._next_event_index}",
 +                step_id=self._next_event_index,
